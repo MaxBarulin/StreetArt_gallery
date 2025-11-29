@@ -1,0 +1,8 @@
+{
+  "name": "StreetArt Map",
+  "description": "Интерактивная карта уличного искусства. Отмечайте граффити, муралы и инсталляции, используйте ИИ для описания.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}

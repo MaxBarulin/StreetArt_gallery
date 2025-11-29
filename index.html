@@ -1,0 +1,119 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StreetArt Map</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              urban: {
+                950: '#0a0a0a',
+                900: '#1a1a1a',
+                800: '#2d2d2d',
+                700: '#3d3d3d',
+                600: '#525252',
+                500: '#737373',
+                accent: '#00e676', // Neon green
+                accentHover: '#00c853',
+                highlight: '#d500f9', // Neon purple
+                danger: '#ff1744',
+              }
+            },
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body, html { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background-color: #1a1a1a; color: #eee; }
+      #root { height: 100%; width: 100%; }
+      
+      /* Map Container */
+      .leaflet-container {
+        background: #1a1a1a;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+      }
+
+      /* Custom Marker Styles */
+      .custom-marker-pin {
+        width: 40px; /* Increased size for visibility */
+        height: 40px;
+        border-radius: 50%;
+        background-color: #00e676;
+        border: 3px solid #ffffff;
+        box-shadow: 0 0 10px rgba(0, 230, 118, 0.6);
+        cursor: pointer;
+        transition: transform 0.2s, box-shadow 0.2s;
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+      .custom-marker-pin:hover {
+        transform: scale(1.15);
+        box-shadow: 0 0 20px #00e676;
+        z-index: 1000;
+      }
+      .custom-marker-pin.selected {
+        border-color: #d500f9;
+        box-shadow: 0 0 20px #d500f9;
+        transform: scale(1.25);
+        z-index: 1001;
+      }
+      /* Fallback icon inside marker if no image */
+      .custom-marker-pin i {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        color: #1a1a1a;
+        font-size: 16px;
+      }
+
+      /* Scrollbar */
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: #1a1a1a; }
+      ::-webkit-scrollbar-thumb { background: #3d3d3d; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #555; }
+      
+      /* Utilities */
+      .glass-panel {
+        background: rgba(26, 26, 26, 0.95);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "leaflet/": "https://aistudiocdn.com/leaflet@^1.9.4/",
+    "leaflet": "https://aistudiocdn.com/leaflet@^1.9.4"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
