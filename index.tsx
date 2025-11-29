@@ -56,7 +56,50 @@ const compressImage = (file: File): Promise<string> => {
 
 // --- Components ---
 
-// 1. Authorization / Welcome Screen
+// 1. Confirmation Modal
+const ConfirmationModal = ({ isOpen, onClose, onConfirm }: { isOpen: boolean; onClose: () => void; onConfirm: () => void }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div 
+        className="absolute inset-0 bg-black/80 backdrop-blur-sm transition-opacity" 
+        onClick={onClose}
+      ></div>
+      
+      {/* Modal Content */}
+      <div className="relative z-10 bg-urban-900 border border-urban-600 rounded-xl p-6 max-w-sm w-full shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="text-center mb-6">
+          <div className="w-14 h-14 rounded-full bg-red-950/50 text-red-500 flex items-center justify-center mx-auto mb-4 border border-red-900 shadow-[0_0_15px_rgba(220,38,38,0.3)]">
+            <i className="fa-solid fa-triangle-exclamation text-2xl"></i>
+          </div>
+          <h3 className="text-xl font-bold text-white mb-2 tracking-wide">Уничтожить метку?</h3>
+          <p className="text-urban-500 text-sm leading-relaxed">
+            Это действие нельзя отменить. Метка и все связанные с ней фотографии будут удалены с карты навсегда.
+          </p>
+        </div>
+        
+        <div className="flex gap-3">
+          <button 
+            onClick={onClose} 
+            className="flex-1 py-3 rounded-lg bg-urban-800 text-urban-300 hover:text-white hover:bg-urban-700 transition-colors font-medium border border-transparent hover:border-urban-600"
+          >
+            Отмена
+          </button>
+          <button 
+            onClick={onConfirm} 
+            className="flex-1 py-3 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-all font-bold shadow-lg shadow-red-900/40 hover:shadow-red-900/60 active:scale-95 border border-red-500"
+          >
+            Удалить
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 2. Authorization / Welcome Screen
 const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-urban-950 bg-[url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2070&auto=format&fit=crop')] bg-cover bg-center">
@@ -83,7 +126,7 @@ const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
   );
 };
 
-// 2. Main Map Component
+// 3. Main Map Component
 const App = () => {
   const [session, setSession] = useState<UserSession>(() => {
     return localStorage.getItem('streetart_session') ? { isAuthenticated: true } : { isAuthenticated: false };
@@ -98,6 +141,9 @@ const App = () => {
   const [isSidebarOpen, setSidebarOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   
+  // Confirmation Modal State
+  const [spotToDelete, setSpotToDelete] = useState<string | null>(null);
+
   // AI State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
@@ -158,7 +204,6 @@ const App = () => {
     // Map Click -> Create Spot
     map.on('click', (e) => {
       // Don't create spot if clicking on a marker
-      // (This is a safety check, though Leaflet usually handles propagation)
       const target = e.originalEvent.target as HTMLElement;
       if (target.closest('.leaflet-marker-icon')) return;
 
@@ -266,8 +311,10 @@ const App = () => {
     // Remove deleted markers
     Object.keys(markersRef.current).forEach(id => {
       if (!spots.find(s => s.id === id)) {
-        markersRef.current[id].remove();
-        delete markersRef.current[id];
+        if (markersRef.current[id]) {
+            markersRef.current[id].remove();
+            delete markersRef.current[id];
+        }
       }
     });
 
@@ -283,18 +330,33 @@ const App = () => {
     setSpots(prev => prev.map(s => s.id === selectedSpotId ? { ...s, ...updates } : s));
   };
 
-  const handleDeleteSpot = () => {
-    if (!selectedSpotId) return;
-    if (confirm('Удалить эту метку навсегда?')) {
-      // Remove from map first to avoid glitches
-      if (markersRef.current[selectedSpotId]) {
-        markersRef.current[selectedSpotId].remove();
-        delete markersRef.current[selectedSpotId];
-      }
-      setSpots(prev => prev.filter(s => s.id !== selectedSpotId));
+  const handleRequestDelete = (id: string) => {
+    setSpotToDelete(id);
+  };
+
+  const executeDelete = () => {
+    if (!spotToDelete) return;
+    
+    const id = spotToDelete;
+
+    // 1. Imperative remove for instant feedback
+    const marker = markersRef.current[id];
+    if (marker) {
+      marker.remove();
+      delete markersRef.current[id];
+    }
+
+    // 2. Update state
+    setSpots(prev => prev.filter(s => s.id !== id));
+    
+    // 3. UI cleanup
+    if (selectedSpotId === id) {
       setSelectedSpotId(null);
       setSidebarOpen(false);
+      setIsEditing(false);
     }
+
+    setSpotToDelete(null);
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -387,6 +449,7 @@ const App = () => {
             {/* Sidebar Header */}
             <div className="p-4 border-b border-urban-700 flex justify-between items-center bg-urban-900/50 rounded-t-2xl md:rounded-none">
               <button 
+                type="button"
                 onClick={() => setSidebarOpen(false)}
                 className="text-urban-500 hover:text-white transition-colors"
               >
@@ -398,6 +461,7 @@ const App = () => {
               <div className="flex gap-2">
                 {!isEditing ? (
                   <button 
+                    type="button"
                     onClick={() => setIsEditing(true)}
                     className="w-8 h-8 rounded-full bg-urban-800 hover:bg-urban-700 flex items-center justify-center text-urban-accent transition-colors"
                     title="Редактировать"
@@ -406,6 +470,7 @@ const App = () => {
                   </button>
                 ) : (
                   <button 
+                    type="button"
                     onClick={() => setIsEditing(false)}
                     className="px-3 py-1 rounded bg-urban-accent text-urban-900 font-bold text-sm"
                   >
@@ -457,6 +522,7 @@ const App = () => {
                     <h3 className="text-xs font-bold text-urban-500 uppercase tracking-widest">Описание</h3>
                     {isEditing && activeSpot.images.length > 0 && (
                       <button 
+                        type="button"
                         onClick={handleGeminiDescription}
                         disabled={isAnalyzing}
                         className="text-xs bg-urban-highlight/20 text-urban-highlight px-2 py-1 rounded border border-urban-highlight hover:bg-urban-highlight hover:text-white transition-all flex items-center gap-1"
@@ -503,6 +569,7 @@ const App = () => {
                         <img src={img} className="w-full h-full object-cover hover:scale-110 transition-transform duration-300" />
                         {isEditing && (
                           <button 
+                            type="button"
                             className="absolute top-1 right-1 w-5 h-5 bg-black/50 text-white rounded-full flex items-center justify-center text-xs hover:bg-red-500 z-10"
                             onClick={(e) => {
                               e.stopPropagation();
@@ -540,12 +607,20 @@ const App = () => {
                 </div>
                 
                 {isEditing && (
-                  <button 
-                    onClick={handleDeleteSpot}
-                    className="w-full py-3 mt-4 rounded-lg border border-urban-700 text-urban-500 hover:bg-danger hover:text-white hover:border-danger transition-all text-sm"
-                  >
-                    <i className="fa-solid fa-trash mr-2"></i> Удалить метку
-                  </button>
+                  <div className="pt-6 mt-6 border-t border-urban-800">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleRequestDelete(activeSpot.id);
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-3 rounded-lg border border-red-900/50 bg-red-950/20 text-red-500 hover:bg-red-600 hover:text-white hover:border-red-600 transition-all text-sm font-medium group"
+                    >
+                      <i className="fa-solid fa-trash-can group-hover:animate-bounce"></i> Уничтожить метку
+                    </button>
+                    <p className="text-center text-[10px] text-urban-600 mt-2">Действие нельзя отменить</p>
+                  </div>
                 )}
 
               </div>
@@ -557,6 +632,14 @@ const App = () => {
           </div>
         )}
       </div>
+
+      {/* Confirmation Modal */}
+      <ConfirmationModal 
+        isOpen={!!spotToDelete} 
+        onClose={() => setSpotToDelete(null)} 
+        onConfirm={executeDelete} 
+      />
+
     </div>
   );
 };
