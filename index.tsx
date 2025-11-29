@@ -26,7 +26,7 @@ interface UserSession {
 // Simple ID generator
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-// Compress image to avoid large storage usage (IndexedDB handles more, but good to be efficient)
+// Compress image to avoid large storage usage
 const compressImage = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -36,7 +36,7 @@ const compressImage = (file: File): Promise<string> => {
       img.src = event.target?.result as string;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 800; // Increased slightly for DB
+        const MAX_WIDTH = 800;
         const scaleSize = MAX_WIDTH / img.width;
         canvas.width = MAX_WIDTH;
         canvas.height = img.height * scaleSize;
@@ -59,7 +59,7 @@ const compressImage = (file: File): Promise<string> => {
 const DB_NAME = 'StreetArtDB';
 const STORE_NAME = 'spots';
 const TILE_STORE_NAME = 'tiles';
-const DB_VERSION = 2; // Incremented for tiles support
+const DB_VERSION = 3; // Bumped version for tiles support
 
 const initDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -73,8 +73,8 @@ const initDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'id' });
       }
-
-      // Tiles Store (Key: URL, Value: Blob)
+      
+      // Tiles Store (Key: "z-x-y", Value: Blob)
       if (!db.objectStoreNames.contains(TILE_STORE_NAME)) {
         db.createObjectStore(TILE_STORE_NAME);
       }
@@ -126,90 +126,106 @@ const dbAPI = {
       console.error("DB Error delete:", e);
     }
   },
-  // Tile Caching Methods
-  getTile: async (url: string): Promise<Blob | undefined> => {
+  // --- Tile Methods ---
+  getTile: async (key: string): Promise<Blob | undefined> => {
     try {
       const db = await initDB();
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
         const transaction = db.transaction(TILE_STORE_NAME, 'readonly');
         const store = transaction.objectStore(TILE_STORE_NAME);
-        const request = store.get(url);
+        const request = store.get(key);
         request.onsuccess = () => resolve(request.result);
-        request.onerror = () => resolve(undefined); // Fail gracefully
+        request.onerror = () => resolve(undefined); // Treat error as missing
       });
     } catch (e) {
       return undefined;
     }
   },
-  saveTile: async (url: string, blob: Blob): Promise<void> => {
+  saveTile: async (key: string, blob: Blob): Promise<void> => {
     try {
       const db = await initDB();
       const transaction = db.transaction(TILE_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(TILE_STORE_NAME);
-      store.put(blob, url);
+      store.put(blob, key);
     } catch (e) {
-      console.error("DB Tile Save Error:", e);
+      // Ignore write errors for cache
     }
   }
 };
 
-// --- Custom Offline Tile Layer ---
+// --- Offline-Ready Tile Layer ---
 
-const createOfflineTileLayer = () => {
-  const OfflineLayer = L.TileLayer.extend({
+const createSmartTileLayer = () => {
+  const SmartLayer = L.TileLayer.extend({
     createTile: function(coords: L.Coords, done: L.DoneCallback) {
       const tile = document.createElement('img');
-      const url = this.getTileUrl(coords);
-
-      // Standard Leaflet options
-      if (this.options.crossOrigin) tile.crossOrigin = '';
       tile.alt = '';
       tile.setAttribute('role', 'presentation');
 
-      // 1. Try to get from DB
-      dbAPI.getTile(url).then(cachedBlob => {
-        if (cachedBlob) {
-          const objectUrl = URL.createObjectURL(cachedBlob);
-          tile.src = objectUrl;
-          // Cleanup object URL when tile is removed/destroyed (optional optimization)
-          L.DomEvent.on(tile, 'load', () => {
-             done(null, tile);
-          });
-          L.DomEvent.on(tile, 'error', () => {
-             // If local blob fails for some reason, try network?
-             done(new Error("Failed to load from cache"), tile);
-          });
-        } else {
-          // 2. Fetch from Network
-          fetch(url)
-            .then(res => {
-              if (!res.ok) throw new Error('Network response was not ok');
-              return res.blob();
-            })
-            .then(blob => {
-              // 3. Save to DB
-              dbAPI.saveTile(url, blob);
-              
-              const objectUrl = URL.createObjectURL(blob);
-              tile.src = objectUrl;
-              done(null, tile);
-            })
-            .catch(err => {
-              // 4. Fallback or Error (Offline and not in DB)
-              console.warn(`Tile fetch failed for ${url}:`, err);
-              done(err, tile);
-            });
+      const key = `${coords.z}-${coords.x}-${coords.y}`;
+
+      (async () => {
+        try {
+          // 1. Try Loading from DB (Cache)
+          const cachedBlob = await dbAPI.getTile(key);
+          if (cachedBlob) {
+            tile.src = URL.createObjectURL(cachedBlob);
+            done(null, tile);
+            return;
+          }
+
+          // 2. Try Loading from Internet
+          const subdomains = ['a', 'b', 'c', 'd'];
+          const s = subdomains[Math.abs(coords.x + coords.y) % subdomains.length];
+          const onlineUrl = `https://${s}.basemaps.cartocdn.com/dark_all/${coords.z}/${coords.x}/${coords.y}${L.Browser.retina ? '@2x' : ''}.png`;
+
+          const response = await fetch(onlineUrl);
+          if (!response.ok) throw new Error('Network response not ok');
+          
+          const blob = await response.blob();
+          
+          // 3. Save to DB for future offline use
+          dbAPI.saveTile(key, blob);
+
+          tile.src = URL.createObjectURL(blob);
+          done(null, tile);
+
+        } catch (error) {
+          // 4. Fallback: Procedural Grid (Offline & No Cache)
+          const canvas = document.createElement('canvas');
+          canvas.width = 256;
+          canvas.height = 256;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, 256, 256);
+            ctx.strokeStyle = '#2d2d2d';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.rect(0, 0, 256, 256);
+            ctx.moveTo(128, 0); ctx.lineTo(128, 256);
+            ctx.moveTo(0, 128); ctx.lineTo(256, 128);
+            ctx.stroke();
+
+            ctx.fillStyle = '#333';
+            ctx.font = '10px monospace';
+            ctx.fillText(`OFFLINE`, 10, 20);
+            
+            if ((coords.x + coords.y) % 2 === 0) {
+                ctx.fillStyle = '#222';
+                ctx.fillRect(100, 100, 56, 56);
+            }
+            tile.src = canvas.toDataURL();
+          }
+          done(null, tile);
         }
-      });
+      })();
 
       return tile;
     }
   });
 
-  return new OfflineLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    maxZoom: 20,
-    subdomains: 'abcd',
-  });
+  return new SmartLayer('', { maxZoom: 18 });
 };
 
 // --- Components ---
@@ -278,7 +294,10 @@ const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
           <span>Войти в андеграунд</span>
           <i className="fa-solid fa-arrow-right"></i>
         </button>
-        <p className="mt-4 text-xs text-urban-600">Оффлайн режим поддерживается. Кэширование карты при просмотре.</p>
+        <div className="mt-4 p-3 bg-urban-950/50 rounded border border-urban-800 text-xs text-left">
+           <p className="text-urban-400 font-bold mb-1"><i className="fa-solid fa-wifi mr-1"></i> Offline Ready</p>
+           <p className="text-urban-600">Карта автоматически сохраняет просмотренные участки в базу данных браузера. Вы сможете видеть их даже без интернета.</p>
+        </div>
       </div>
     </div>
   );
@@ -313,18 +332,17 @@ const App = () => {
       const data = await dbAPI.getAll();
       setSpots(data);
       
-      // Migration check (optional): if localstorage has spots but DB is empty
+      // Migration check (optional)
       const lsSpots = localStorage.getItem('streetart_spots');
       if (data.length === 0 && lsSpots) {
         try {
           const parsed = JSON.parse(lsSpots);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            console.log("Migrating spots from LocalStorage to IndexedDB...");
             for (const s of parsed) {
               await dbAPI.save(s);
             }
             setSpots(parsed);
-            localStorage.removeItem('streetart_spots'); // Cleanup
+            localStorage.removeItem('streetart_spots');
           }
         } catch (e) {
           console.error("Migration failed", e);
@@ -346,7 +364,7 @@ const App = () => {
     if (!session.isAuthenticated) return;
     if (mapRef.current) return;
 
-    // Default center (Moscow for demo, or get geolocation)
+    // Default center
     const defaultCenter: [number, number] = [55.7558, 37.6173]; 
     
     const map = L.map('map-container', {
@@ -354,13 +372,12 @@ const App = () => {
       attributionControl: false
     }).setView(defaultCenter, 13);
 
-    // Use Custom Offline Tile Layer
-    const offlineLayer = createOfflineTileLayer();
-    offlineLayer.addTo(map);
+    // Use SMART Cache Layer
+    const smartLayer = createSmartTileLayer();
+    smartLayer.addTo(map);
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    // Force map to recalculate size after render to fix "half grey" issue
     setTimeout(() => {
       map.invalidateSize();
     }, 100);
@@ -368,7 +385,6 @@ const App = () => {
     // Check geolocation after map init
     if (navigator.geolocation) {
        navigator.geolocation.getCurrentPosition((pos) => {
-         // Only set view if map still exists
          if (map) {
              map.setView([pos.coords.latitude, pos.coords.longitude], 14);
          }
@@ -377,7 +393,6 @@ const App = () => {
 
     // Map Click -> Create Spot
     map.on('click', (e) => {
-      // Don't create spot if clicking on a marker
       const target = e.originalEvent.target as HTMLElement;
       if (target.closest('.leaflet-marker-icon')) return;
 
@@ -393,7 +408,6 @@ const App = () => {
         `)
         .openOn(map);
 
-      // Handle button click inside popup
       setTimeout(() => {
         const btn = document.getElementById('create-spot-btn');
         if (btn) {
@@ -409,7 +423,6 @@ const App = () => {
               createdAt: Date.now()
             };
             
-            // Save to DB
             await dbAPI.save(newSpot);
             
             setSpots(prev => [...prev, newSpot]);
@@ -436,13 +449,11 @@ const App = () => {
   useEffect(() => {
     if (!mapRef.current) return;
 
-    // Add/Update markers
     spots.forEach(spot => {
       const isSelected = selectedSpotId === spot.id;
       const hasImage = spot.images.length > 0;
       const coverImage = hasImage ? spot.images[spot.coverIndex] || spot.images[0] : null;
 
-      // Construct HTML for the marker
       let htmlContent = '';
       let style = '';
       
@@ -453,23 +464,21 @@ const App = () => {
       }
 
       const icon = L.divIcon({
-        className: '', // We set classes in the HTML string to have full control or use clean divIcon
+        className: '',
         html: `<div class="custom-marker-pin ${isSelected ? 'selected' : ''}" style="${style}">${htmlContent}</div>`,
         iconSize: [40, 40],
         iconAnchor: [20, 20]
       });
 
       if (!markersRef.current[spot.id]) {
-        // Create new marker
         const marker = L.marker([spot.lat, spot.lng], { icon }).addTo(mapRef.current!);
         
         marker.on('click', (e) => {
-          L.DomEvent.stopPropagation(e); // Stop click from hitting the map
+          L.DomEvent.stopPropagation(e);
           setSelectedSpotId(spot.id);
           setSidebarOpen(true);
           setIsEditing(false);
           
-          // Center map on marker slightly offset to fit sidebar
           if (mapRef.current) {
             mapRef.current.flyTo([spot.lat, spot.lng], 16, { duration: 0.8 });
           }
@@ -477,16 +486,12 @@ const App = () => {
 
         markersRef.current[spot.id] = marker;
       } else {
-        // Update existing marker icon (to refresh image/selection state)
         markersRef.current[spot.id].setIcon(icon);
         markersRef.current[spot.id].setLatLng([spot.lat, spot.lng]);
-        
-        // Ensure z-index is correct (selected on top)
         markersRef.current[spot.id].setZIndexOffset(isSelected ? 1000 : 0);
       }
     });
 
-    // Remove deleted markers
     Object.keys(markersRef.current).forEach(id => {
       if (!spots.find(s => s.id === id)) {
         if (markersRef.current[id]) {
@@ -506,11 +511,9 @@ const App = () => {
   const handleUpdateSpot = async (updates: Partial<ArtSpot>) => {
     if (!selectedSpotId) return;
     
-    // Optimistic Update
     setSpots(prev => prev.map(s => {
       if (s.id === selectedSpotId) {
         const updated = { ...s, ...updates };
-        // Fire and forget save to DB
         dbAPI.save(updated);
         return updated;
       }
@@ -524,23 +527,18 @@ const App = () => {
 
   const executeDelete = async () => {
     if (!spotToDelete) return;
-    
     const id = spotToDelete;
 
-    // 1. Update DB
     await dbAPI.delete(id);
 
-    // 2. Imperative remove for instant feedback on map
     const marker = markersRef.current[id];
     if (marker) {
       marker.remove();
       delete markersRef.current[id];
     }
 
-    // 3. Update state
     setSpots(prev => prev.filter(s => s.id !== id));
     
-    // 4. UI cleanup
     if (selectedSpotId === id) {
       setSelectedSpotId(null);
       setSidebarOpen(false);
@@ -554,7 +552,6 @@ const App = () => {
     if (!e.target.files || !selectedSpotId) return;
     const files = Array.from(e.target.files) as File[];
     
-    // Process files
     const newImages: string[] = [];
     for (const file of files) {
       try {
@@ -613,15 +610,15 @@ const App = () => {
 
   return (
     <div className="fixed inset-0 overflow-hidden font-sans bg-urban-950">
-      {/* Map Container - Always full screen */}
-      <div id="map-container" className="fixed inset-0 z-0"></div>
+      {/* Map Container */}
+      <div id="map-container" className="fixed inset-0 z-0 bg-[#1a1a1a]"></div>
 
       {/* Header Overlay */}
       <div className="absolute top-0 left-0 right-0 z-20 p-4 pointer-events-none">
         <div className="flex justify-between items-start">
           <div className="glass-panel px-4 py-2 rounded-full shadow-lg pointer-events-auto flex items-center gap-3">
              <i className="fa-solid fa-map text-urban-accent"></i>
-             <span className="font-bold text-white tracking-wider">STREET<span className="text-urban-accent">ART</span> MAP</span>
+             <span className="font-bold text-white tracking-wider">STREET<span className="text-urban-accent">ART</span> MAP <span className="text-[10px] text-urban-500 bg-urban-950 px-1 rounded ml-1 border border-urban-800">OFFLINE READY</span></span>
           </div>
         </div>
       </div>
@@ -637,7 +634,6 @@ const App = () => {
       >
         {activeSpot ? (
           <>
-            {/* Sidebar Header */}
             <div className="p-4 border-b border-urban-700 flex justify-between items-center bg-urban-900/50 rounded-t-2xl md:rounded-none">
               <button 
                 type="button"
@@ -671,10 +667,8 @@ const App = () => {
               </div>
             </div>
 
-            {/* Sidebar Content */}
             <div className="flex-1 overflow-y-auto p-0 scrollbar-hide bg-urban-900">
               
-              {/* Cover Image */}
               <div className="relative h-56 bg-urban-950 w-full group">
                 {activeSpot.images.length > 0 ? (
                   <img 
@@ -688,8 +682,6 @@ const App = () => {
                     <p>Нет фото</p>
                   </div>
                 )}
-                
-                {/* Image Overlay Gradient */}
                 <div className="absolute inset-0 bg-gradient-to-t from-urban-900 via-transparent to-transparent opacity-80"></div>
                 
                 <h2 className="absolute bottom-4 left-4 right-4 text-2xl font-bold text-white drop-shadow-lg">
@@ -707,7 +699,6 @@ const App = () => {
 
               <div className="p-6 space-y-6">
                 
-                {/* Description */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <h3 className="text-xs font-bold text-urban-500 uppercase tracking-widest">Описание</h3>
@@ -738,7 +729,6 @@ const App = () => {
                   )}
                 </div>
 
-                {/* Gallery */}
                 <div className="space-y-2">
                   <h3 className="text-xs font-bold text-urban-500 uppercase tracking-widest flex justify-between">
                     <span>Галерея ({activeSpot.images.length})</span>
@@ -780,7 +770,6 @@ const App = () => {
                       </div>
                     ))}
                     
-                    {/* Empty State for Gallery if Editing */}
                     {isEditing && (
                       <label className="aspect-square rounded-lg border-2 border-dashed border-urban-600 flex flex-col items-center justify-center text-urban-600 hover:text-urban-accent hover:border-urban-accent cursor-pointer transition-colors bg-urban-800/50">
                         <i className="fa-solid fa-camera text-xl mb-1"></i>
@@ -791,7 +780,6 @@ const App = () => {
                   </div>
                 </div>
 
-                {/* Meta Info */}
                 <div className="pt-4 border-t border-urban-800 text-xs text-urban-600 flex justify-between">
                   <span>ID: {activeSpot.id}</span>
                   <span>{new Date(activeSpot.createdAt).toLocaleDateString()}</span>
@@ -824,7 +812,6 @@ const App = () => {
         )}
       </div>
 
-      {/* Confirmation Modal */}
       <ConfirmationModal 
         isOpen={!!spotToDelete} 
         onClose={() => setSpotToDelete(null)} 
