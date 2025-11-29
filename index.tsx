@@ -26,7 +26,7 @@ interface UserSession {
 // Simple ID generator
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-// Compress image to avoid LocalStorage limits
+// Compress image to avoid large storage usage (IndexedDB handles more, but good to be efficient)
 const compressImage = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -36,14 +36,14 @@ const compressImage = (file: File): Promise<string> => {
       img.src = event.target?.result as string;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 600; // Reduced size slightly for performance
+        const MAX_WIDTH = 800; // Increased slightly for DB
         const scaleSize = MAX_WIDTH / img.width;
         canvas.width = MAX_WIDTH;
         canvas.height = img.height * scaleSize;
         const ctx = canvas.getContext('2d');
         if (ctx) {
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            resolve(canvas.toDataURL('image/jpeg', 0.6)); // Quality 0.6
+            resolve(canvas.toDataURL('image/jpeg', 0.7)); 
         } else {
             reject(new Error("Canvas context is null"));
         }
@@ -52,6 +52,72 @@ const compressImage = (file: File): Promise<string> => {
     };
     reader.onerror = (err) => reject(err);
   });
+};
+
+// --- IndexedDB Layer ---
+
+const DB_NAME = 'StreetArtDB';
+const STORE_NAME = 'spots';
+const DB_VERSION = 1;
+
+const initDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+  });
+};
+
+const dbAPI = {
+  getAll: async (): Promise<ArtSpot[]> => {
+    try {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error("DB Error getAll:", e);
+      return [];
+    }
+  },
+  save: async (spot: ArtSpot): Promise<void> => {
+    try {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.put(spot);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error("DB Error save:", e);
+    }
+  },
+  delete: async (id: string): Promise<void> => {
+    try {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error("DB Error delete:", e);
+    }
+  }
 };
 
 // --- Components ---
@@ -76,7 +142,7 @@ const ConfirmationModal = ({ isOpen, onClose, onConfirm }: { isOpen: boolean; on
           </div>
           <h3 className="text-xl font-bold text-white mb-2 tracking-wide">Уничтожить метку?</h3>
           <p className="text-urban-500 text-sm leading-relaxed">
-            Это действие нельзя отменить. Метка и все связанные с ней фотографии будут удалены с карты навсегда.
+            Это действие нельзя отменить. Метка и все связанные с ней фотографии будут удалены из базы данных.
           </p>
         </div>
         
@@ -120,7 +186,7 @@ const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
           <span>Войти в андеграунд</span>
           <i className="fa-solid fa-arrow-right"></i>
         </button>
-        <p className="mt-4 text-xs text-urban-600">Все метки публичные. Модерация сообществом.</p>
+        <p className="mt-4 text-xs text-urban-600">Все метки публичные. База данных локальная.</p>
       </div>
     </div>
   );
@@ -132,11 +198,7 @@ const App = () => {
     return localStorage.getItem('streetart_session') ? { isAuthenticated: true } : { isAuthenticated: false };
   });
 
-  const [spots, setSpots] = useState<ArtSpot[]>(() => {
-    const saved = localStorage.getItem('streetart_spots');
-    return saved ? JSON.parse(saved) : [];
-  });
-
+  const [spots, setSpots] = useState<ArtSpot[]>([]);
   const [selectedSpotId, setSelectedSpotId] = useState<string | null>(null);
   const [isSidebarOpen, setSidebarOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -153,10 +215,32 @@ const App = () => {
 
   // --- Effects ---
 
-  // Persist spots
+  // Load spots from IndexedDB
   useEffect(() => {
-    localStorage.setItem('streetart_spots', JSON.stringify(spots));
-  }, [spots]);
+    const loadSpots = async () => {
+      const data = await dbAPI.getAll();
+      setSpots(data);
+      
+      // Migration check (optional): if localstorage has spots but DB is empty
+      const lsSpots = localStorage.getItem('streetart_spots');
+      if (data.length === 0 && lsSpots) {
+        try {
+          const parsed = JSON.parse(lsSpots);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            console.log("Migrating spots from LocalStorage to IndexedDB...");
+            for (const s of parsed) {
+              await dbAPI.save(s);
+            }
+            setSpots(parsed);
+            localStorage.removeItem('streetart_spots'); // Cleanup
+          }
+        } catch (e) {
+          console.error("Migration failed", e);
+        }
+      }
+    };
+    loadSpots();
+  }, []);
 
   // Persist session
   useEffect(() => {
@@ -223,7 +307,7 @@ const App = () => {
       setTimeout(() => {
         const btn = document.getElementById('create-spot-btn');
         if (btn) {
-          btn.onclick = () => {
+          btn.onclick = async () => {
             const newSpot: ArtSpot = {
               id: generateId(),
               lat: e.latlng.lat,
@@ -234,6 +318,10 @@ const App = () => {
               coverIndex: 0,
               createdAt: Date.now()
             };
+            
+            // Save to DB
+            await dbAPI.save(newSpot);
+            
             setSpots(prev => [...prev, newSpot]);
             setSelectedSpotId(newSpot.id);
             setSidebarOpen(true);
@@ -325,31 +413,44 @@ const App = () => {
 
   const activeSpot = useMemo(() => spots.find(s => s.id === selectedSpotId), [spots, selectedSpotId]);
 
-  const handleUpdateSpot = (updates: Partial<ArtSpot>) => {
+  const handleUpdateSpot = async (updates: Partial<ArtSpot>) => {
     if (!selectedSpotId) return;
-    setSpots(prev => prev.map(s => s.id === selectedSpotId ? { ...s, ...updates } : s));
+    
+    // Optimistic Update
+    setSpots(prev => prev.map(s => {
+      if (s.id === selectedSpotId) {
+        const updated = { ...s, ...updates };
+        // Fire and forget save to DB
+        dbAPI.save(updated);
+        return updated;
+      }
+      return s;
+    }));
   };
 
   const handleRequestDelete = (id: string) => {
     setSpotToDelete(id);
   };
 
-  const executeDelete = () => {
+  const executeDelete = async () => {
     if (!spotToDelete) return;
     
     const id = spotToDelete;
 
-    // 1. Imperative remove for instant feedback
+    // 1. Update DB
+    await dbAPI.delete(id);
+
+    // 2. Imperative remove for instant feedback on map
     const marker = markersRef.current[id];
     if (marker) {
       marker.remove();
       delete markersRef.current[id];
     }
 
-    // 2. Update state
+    // 3. Update state
     setSpots(prev => prev.filter(s => s.id !== id));
     
-    // 3. UI cleanup
+    // 4. UI cleanup
     if (selectedSpotId === id) {
       setSelectedSpotId(null);
       setSidebarOpen(false);
