@@ -58,7 +58,8 @@ const compressImage = (file: File): Promise<string> => {
 
 const DB_NAME = 'StreetArtDB';
 const STORE_NAME = 'spots';
-const DB_VERSION = 1;
+const TILE_STORE_NAME = 'tiles';
+const DB_VERSION = 2; // Incremented for tiles support
 
 const initDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -67,8 +68,15 @@ const initDB = (): Promise<IDBDatabase> => {
     request.onsuccess = () => resolve(request.result);
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Spots Store
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+
+      // Tiles Store (Key: URL, Value: Blob)
+      if (!db.objectStoreNames.contains(TILE_STORE_NAME)) {
+        db.createObjectStore(TILE_STORE_NAME);
       }
     };
   });
@@ -117,7 +125,91 @@ const dbAPI = {
     } catch (e) {
       console.error("DB Error delete:", e);
     }
+  },
+  // Tile Caching Methods
+  getTile: async (url: string): Promise<Blob | undefined> => {
+    try {
+      const db = await initDB();
+      return new Promise((resolve) => {
+        const transaction = db.transaction(TILE_STORE_NAME, 'readonly');
+        const store = transaction.objectStore(TILE_STORE_NAME);
+        const request = store.get(url);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(undefined); // Fail gracefully
+      });
+    } catch (e) {
+      return undefined;
+    }
+  },
+  saveTile: async (url: string, blob: Blob): Promise<void> => {
+    try {
+      const db = await initDB();
+      const transaction = db.transaction(TILE_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(TILE_STORE_NAME);
+      store.put(blob, url);
+    } catch (e) {
+      console.error("DB Tile Save Error:", e);
+    }
   }
+};
+
+// --- Custom Offline Tile Layer ---
+
+const createOfflineTileLayer = () => {
+  const OfflineLayer = L.TileLayer.extend({
+    createTile: function(coords: L.Coords, done: L.DoneCallback) {
+      const tile = document.createElement('img');
+      const url = this.getTileUrl(coords);
+
+      // Standard Leaflet options
+      if (this.options.crossOrigin) tile.crossOrigin = '';
+      tile.alt = '';
+      tile.setAttribute('role', 'presentation');
+
+      // 1. Try to get from DB
+      dbAPI.getTile(url).then(cachedBlob => {
+        if (cachedBlob) {
+          const objectUrl = URL.createObjectURL(cachedBlob);
+          tile.src = objectUrl;
+          // Cleanup object URL when tile is removed/destroyed (optional optimization)
+          L.DomEvent.on(tile, 'load', () => {
+             done(null, tile);
+          });
+          L.DomEvent.on(tile, 'error', () => {
+             // If local blob fails for some reason, try network?
+             done(new Error("Failed to load from cache"), tile);
+          });
+        } else {
+          // 2. Fetch from Network
+          fetch(url)
+            .then(res => {
+              if (!res.ok) throw new Error('Network response was not ok');
+              return res.blob();
+            })
+            .then(blob => {
+              // 3. Save to DB
+              dbAPI.saveTile(url, blob);
+              
+              const objectUrl = URL.createObjectURL(blob);
+              tile.src = objectUrl;
+              done(null, tile);
+            })
+            .catch(err => {
+              // 4. Fallback or Error (Offline and not in DB)
+              console.warn(`Tile fetch failed for ${url}:`, err);
+              done(err, tile);
+            });
+        }
+      });
+
+      return tile;
+    }
+  });
+
+  return new OfflineLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 20,
+    subdomains: 'abcd',
+  });
 };
 
 // --- Components ---
@@ -165,7 +257,7 @@ const ConfirmationModal = ({ isOpen, onClose, onConfirm }: { isOpen: boolean; on
   );
 };
 
-// 2. Authorization / Welcome Screen
+// 2. Auth / Welcome Screen
 const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-urban-950 bg-[url('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2070&auto=format&fit=crop')] bg-cover bg-center">
@@ -186,7 +278,7 @@ const AuthScreen = ({ onEnter }: { onEnter: () => void }) => {
           <span>Войти в андеграунд</span>
           <i className="fa-solid fa-arrow-right"></i>
         </button>
-        <p className="mt-4 text-xs text-urban-600">Все метки публичные. База данных локальная.</p>
+        <p className="mt-4 text-xs text-urban-600">Оффлайн режим поддерживается. Кэширование карты при просмотре.</p>
       </div>
     </div>
   );
@@ -262,11 +354,9 @@ const App = () => {
       attributionControl: false
     }).setView(defaultCenter, 13);
 
-    // Dark Map Style (CartoDB Dark Matter)
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 20,
-      subdomains: 'abcd',
-    }).addTo(map);
+    // Use Custom Offline Tile Layer
+    const offlineLayer = createOfflineTileLayer();
+    offlineLayer.addTo(map);
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
